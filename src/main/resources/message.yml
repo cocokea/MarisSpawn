@@ -1,0 +1,32 @@
+only-player: "Only players can use this command."
+no-permission: "&cYou do not have permission."
+world-not-found: "&cWorld not found."
+no-destinations: "none"
+
+teleport-countdown: "&7Teleport in &#FFED00%cooldown%s"
+teleport-cancelled-moved: "&cTeleport cancelled because you moved."
+spawn-success: "&7You teleported to &#FFED00sᴘᴀᴡɴ %spawn%"
+warp-success: "&7You were warped to &#FFED00%warp%"
+afk-success: "&7You teleported to &#FFED00ᴀғᴋ %afk%"
+
+spawn-not-found: "&cSpawn not found."
+warp-not-found: "&cWarp not found."
+afk-not-found: "&cAFK not found."
+
+warp-usage:
+  - "&cUsage /warp (destination)"
+  - "&cDestination: %destinations%"
+
+setspawn-usage: "&cUsage /setspawn <name>"
+setspawn-success: "&7Set spawn &#FFED00%spawn%"
+
+setwarp-usage: "&cUsage /setwarp <name>"
+setwarp-success: "&7Set warp &#FFED00%warp%"
+
+setafk-usage: "&cUsage /setafk <name>"
+setafk-success: "&7Set afk &#FFED00%afk%"
+
+delwarp-usage:
+  - "&cUsage /delwarp <name>"
+  - "&cDestination: %destinations%"
+delwarp-success: "&7Deleted warp &#FFED00%warp%"

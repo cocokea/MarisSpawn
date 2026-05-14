@@ -1,0 +1,37 @@
+# MarisSpawn v1.0
+# Build bang Paper API 26.1.2, api-version de 1.21 de plugin co the load tu 1.21 tro len.
+
+teleport:
+  cooldown-seconds: 5
+  countdown-sound: BLOCK_NOTE_BLOCK_HAT
+  countdown-volume: 1.0
+  countdown-pitch: 1.2
+  success-sound: ENTITY_ENDERMAN_TELEPORT
+
+spawn-gui:
+  rows: 6
+  title: "&8sᴘᴀᴡɴ"
+  first-slot: 0
+  last-slot: 44
+  item:
+    material: ITEM_FRAME
+    name: "&#FFED00sᴘᴀᴡɴ %spawn%"
+    max-online: 100
+    lore:
+      - "&8%online_lobby%/%max_online%"
+      - "&7Click to go to this"
+      - "&7Spawn area."
+
+afk-gui:
+  rows: 6
+  title: "&8ᴀғᴋ"
+  first-slot: 0
+  last-slot: 44
+  item:
+    material: ITEM_FRAME
+    name: "&#FFED00ᴀғᴋ %afk%"
+    max-online: 100
+    lore:
+      - "&8%online_lobby%/%max_online%"
+      - "&7Click to go to this"
+      - "&7AFK area."
