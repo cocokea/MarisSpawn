@@ -1,6 +1,6 @@
 # MarisSpawn
 
-MarisSpawn is a Folia-safe spawn, warp, and AFK location plugin for Paper based servers.
+MarisSpawn is a Folia-safe spawn, warp, and AFK location plugin for Paper-based servers.
 
 ## What It Handles
 
@@ -20,7 +20,7 @@ MarisSpawn is a Folia-safe spawn, warp, and AFK location plugin for Paper based 
 1. Drop the plugin jar into the `plugins` folder.
 2. Start the server once.
 3. Edit the generated files in `plugins/MarisSpawn` if needed.
-4. Restart the server or reload the plugin through your normal maintenance flow.
+4. Restart the server.
 
 ## First Setup
 
@@ -46,6 +46,15 @@ Saved locations are stored in `location.yml`.
 - `/setafk <name>` - Save an AFK location.
 - `/delwarp <name>` - Remove a warp.
 
+## Command Examples
+
+```text
+/setspawn main
+/setwarp crates
+/spawn main
+/warp crates
+```
+
 ## Permission
 
 - `marisspawn.admin` - Access admin location commands.
@@ -55,6 +64,12 @@ Saved locations are stored in `location.yml`.
 - `config.yml` - Main settings.
 - `message.yml` - Messages shown to players.
 - `location.yml` - Saved spawn, warp, and AFK locations.
+
+## Common Mistakes
+
+- Setting only the spawn and forgetting warp or AFK targets used by other server flows.
+- Renaming locations manually in YAML without checking references used in GUIs.
+- Not rechecking teleport permissions after changing admin structure.
 
 ## Notes
 
