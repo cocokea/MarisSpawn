@@ -1,0 +1,9 @@
+title: "&8sᴘᴀᴡɴ"
+item:
+  material: ITEM_FRAME
+  name: "&#00A2FFsᴘᴀᴡɴ %spawn%"
+  max-online: 100
+  lore:
+    - "&8%online_lobby%/%max_online%"
+    - "&7Click to go to this"
+    - "&7Spawn area."

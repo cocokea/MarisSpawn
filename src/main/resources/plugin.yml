@@ -29,6 +29,10 @@ commands:
     description: Set an afk location.
     usage: /setafk <name>
     permission: marisspawn.admin
+  marispawn:
+    description: Admin command for MarisSpawn.
+    usage: /marispawn reload
+    permission: marisspawn.admin
 permissions:
   marisspawn.admin:
     default: op

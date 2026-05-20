@@ -1,0 +1,9 @@
+title: "&8ᴀғᴋ ᴀʀᴇᴀs"
+item:
+  material: ITEM_FRAME
+  name: "&#9400FFᴀғᴋ %afk%"
+  max-online: 100
+  lore:
+    - "&8%online_lobby%/%max_online%"
+    - "&7Click to go to this"
+    - "&7AFK area."

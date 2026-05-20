@@ -22,7 +22,12 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
@@ -31,51 +36,55 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public final class MarisSpawnPlugin extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
     private static final MiniMessage MINI = MiniMessage.miniMessage();
+    private static final int GUI_SIZE = 54;
+    private static final int PAGE_SIZE = 45;
+    private static final long AFK_TRIGGER_MILLIS = 60_000L;
 
     private final Map<String, Location> spawns = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
     private final Map<String, Location> warps = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
     private final Map<String, Location> afks = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-    private final Map<Integer, String> guiSlots = new HashMap<>();
     private final Set<Player> teleporting = ConcurrentHashMap.newKeySet();
+    private final Map<java.util.UUID, Long> lastMovement = new ConcurrentHashMap<>();
+    private final Set<java.util.UUID> afkAutoTeleporting = ConcurrentHashMap.newKeySet();
 
     private File locationFile;
     private FileConfiguration locationConfig;
     private File messageFile;
     private FileConfiguration messages;
+    private File spawnsFile;
+    private FileConfiguration spawnsGuiConfig;
+    private File afkGuiFile;
+    private FileConfiguration afkGuiConfig;
     private String defaultSpawn = "";
+    private Object afkTaskHandle;
+    private boolean afkWatcherUsesFolia;
 
     @Override
     public void onEnable() {
+        
         saveDefaultConfig();
-        saveResourceIfMissing("message.yml");
-        saveResourceIfMissing("location.yml");
-
-        locationFile = new File(getDataFolder(), "location.yml");
-        migrateLocationFileBeforeLoad();
-        locationConfig = YamlConfiguration.loadConfiguration(locationFile);
-        messageFile = new File(getDataFolder(), "message.yml");
-        messages = YamlConfiguration.loadConfiguration(messageFile);
-
-        loadLocations();
-
+        MarisPluginStartup.bootstrap(this, "cocokea/MarisSpawn");
+loadPluginState();
         Bukkit.getPluginManager().registerEvents(this, this);
         register("spawn");
         register("warp");
@@ -84,13 +93,53 @@ public final class MarisSpawnPlugin extends JavaPlugin implements Listener, Comm
         register("delwarp");
         register("afk");
         register("setafk");
+        register("marispawn");
+        startAfkWatcher();
+    }
+
+    @Override
+    public void onDisable() {
+        stopAfkWatcher();
+        teleporting.clear();
+        lastMovement.clear();
+        afkAutoTeleporting.clear();
+    }
+
+    private void loadPluginState() {
+        saveDefaultConfig();
+        saveResourceIfMissing("message.yml");
+        saveResourceIfMissing("location.yml");
+        saveResourceIfMissing("spawns.yml");
+        saveResourceIfMissing("guis/afk-areas.yml");
+
+        locationFile = new File(getDataFolder(), "location.yml");
+        migrateLocationFileBeforeLoad();
+        locationConfig = YamlConfiguration.loadConfiguration(locationFile);
+        messageFile = new File(getDataFolder(), "message.yml");
+        messages = YamlConfiguration.loadConfiguration(messageFile);
+        spawnsFile = new File(getDataFolder(), "spawns.yml");
+        spawnsGuiConfig = YamlConfiguration.loadConfiguration(spawnsFile);
+        afkGuiFile = new File(new File(getDataFolder(), "guis"), "afk-areas.yml");
+        afkGuiConfig = YamlConfiguration.loadConfiguration(afkGuiFile);
+
+        loadLocations();
+    }
+
+    private void reloadPluginState() {
+        reloadConfig();
+        messages = YamlConfiguration.loadConfiguration(messageFile);
+        locationConfig = YamlConfiguration.loadConfiguration(locationFile);
+        spawnsGuiConfig = YamlConfiguration.loadConfiguration(spawnsFile);
+        afkGuiConfig = YamlConfiguration.loadConfiguration(afkGuiFile);
+        loadLocations();
     }
 
     private void saveResourceIfMissing(String resourcePath) {
         File file = new File(getDataFolder(), resourcePath);
-        if (!file.exists()) saveResource(resourcePath, false);
+        if (!file.exists()) {
+            saveResource(resourcePath, false);
+        }
     }
-
 
     private void migrateLocationFileBeforeLoad() {
         if (locationFile == null || !locationFile.exists()) return;
@@ -139,6 +188,11 @@ public final class MarisSpawnPlugin extends JavaPlugin implements Listener, Comm
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         String name = command.getName().toLowerCase(Locale.ROOT);
         if (!(sender instanceof Player player)) {
+            if ("marispawn".equals(name) && args.length > 0 && "reload".equalsIgnoreCase(args[0])) {
+                reloadPluginState();
+                sender.sendMessage("MarisSpawn reloaded.");
+                return true;
+            }
             sender.sendMessage(plainMessage("only-player"));
             return true;
         }
@@ -151,14 +205,27 @@ public final class MarisSpawnPlugin extends JavaPlugin implements Listener, Comm
             case "delwarp" -> handleDelWarp(player, args);
             case "afk" -> handleAfk(player, args);
             case "setafk" -> handleSetAfk(player, args);
-            default -> { return false; }
+            case "marispawn" -> handleMarisSpawn(player, args);
+            default -> {
+                return false;
+            }
         }
         return true;
     }
 
+    private void handleMarisSpawn(Player player, String[] args) {
+        if (!hasAdmin(player)) return;
+        if (args.length == 1 && "reload".equalsIgnoreCase(args[0])) {
+            reloadPluginState();
+            player.sendMessage(color("&aReloaded MarisSpawn."));
+            return;
+        }
+        player.sendMessage(color("&cUsage: /marispawn reload"));
+    }
+
     private void handleSpawn(Player player, String[] args) {
         if (args.length == 0) {
-            openSpawnGui(player);
+            openSpawnGui(player, 0);
             return;
         }
         String key = args[0];
@@ -186,7 +253,7 @@ public final class MarisSpawnPlugin extends JavaPlugin implements Listener, Comm
 
     private void handleAfk(Player player, String[] args) {
         if (args.length == 0) {
-            openAfkGui(player);
+            openAfkGui(player, 0);
             return;
         }
         String key = args[0];
@@ -261,93 +328,224 @@ public final class MarisSpawnPlugin extends JavaPlugin implements Listener, Comm
         return false;
     }
 
-    private void openSpawnGui(Player player) {
-        openLocationGui(player, "spawn", spawns, "spawn-gui", new SpawnHolder());
+    private void openSpawnGui(Player player, int page) {
+        openLocationGui(player, GuiType.SPAWN, spawns, spawnsGuiConfig, page);
     }
 
-    private void openAfkGui(Player player) {
-        openLocationGui(player, "afk", afks, "afk-gui", new AfkHolder());
+    private void openAfkGui(Player player, int page) {
+        openLocationGui(player, GuiType.AFK, afks, afkGuiConfig, page);
     }
 
-    private void openLocationGui(Player player, String placeholder, Map<String, Location> locations, String configPath, InventoryHolder holder) {
-        guiSlots.clear();
-        int rows = Math.max(1, Math.min(6, getConfig().getInt(configPath + ".rows", 6)));
-        Inventory inventory = Bukkit.createInventory(holder, rows * 9, color(getConfig().getString(configPath + ".title", "&8" + placeholder)));
-        int firstSlot = getConfig().getInt(configPath + ".first-slot", 0);
-        int lastSlot = Math.min(getConfig().getInt(configPath + ".last-slot", 44), inventory.getSize() - 1);
-        Material material = material(getConfig().getString(configPath + ".item.material", "ITEM_FRAME"));
+    private void openLocationGui(Player player, GuiType type, Map<String, Location> locations, FileConfiguration guiConfig, int page) {
+        List<String> keys = new ArrayList<>(locations.keySet());
+        int pageCount = Math.max(1, (int) Math.ceil(keys.size() / (double) PAGE_SIZE));
+        int safePage = Math.max(0, Math.min(page, pageCount - 1));
+        Inventory inventory = Bukkit.createInventory(new PagedHolder(type, safePage), GUI_SIZE, color(apply(guiConfig.getString("title", "&8gui"), Map.of("page", String.valueOf(safePage + 1)))));
 
-        int slot = firstSlot;
-        for (Map.Entry<String, Location> entry : locations.entrySet()) {
-            while (slot <= lastSlot && inventory.getItem(slot) != null) slot++;
-            if (slot > lastSlot) break;
-
-            String key = entry.getKey();
-            Location location = entry.getValue();
-            int online = onlineInWorld(location.getWorld());
-            int max = getConfig().getInt(configPath + ".item.max-online", 100);
-            Map<String, String> map = Map.of(
-                    placeholder, key,
-                    "name", key,
-                    "online_lobby", String.valueOf(online),
-                    "max_online", String.valueOf(max)
-            );
-
-            ItemStack item = new ItemStack(material);
-            ItemMeta meta = item.getItemMeta();
-            meta.displayName(noItalic(color(apply(getConfig().getString(configPath + ".item.name", "&#FFED00" + placeholder + " %name%"), map))));
-            List<Component> lore = new ArrayList<>();
-            for (String line : getConfig().getStringList(configPath + ".item.lore")) lore.add(noItalic(color(apply(line, map))));
-            meta.lore(lore);
-            item.setItemMeta(meta);
-            inventory.setItem(slot, item);
-            guiSlots.put(slot, key);
-            slot++;
+        int start = safePage * PAGE_SIZE;
+        int end = Math.min(start + PAGE_SIZE, keys.size());
+        for (int index = start; index < end; index++) {
+            int slot = index - start;
+            String key = keys.get(index);
+            Location location = locations.get(key);
+            inventory.setItem(slot, createLocationItem(guiConfig, type, key, location));
         }
+
+        if (safePage > 0) {
+            inventory.setItem(45, createSimpleItem(Material.ARROW, "&#00FF8Cʙᴀᴄᴋ", List.of("&fClick to go to the previous page")));
+        }
+        if (safePage + 1 < pageCount) {
+            inventory.setItem(53, createSimpleItem(Material.ARROW, "&#00FF8Cɴᴇxᴛ", List.of("&fClick to go to the next page")));
+        }
+
+        if (type == GuiType.SPAWN) {
+            inventory.setItem(49, createSimpleItem(Material.LIGHT_BLUE_GLAZED_TERRACOTTA, "&#00FF8Csᴘᴀᴡɴs", List.of("&fClick to teleport to a random spawn")));
+        } else {
+            inventory.setItem(49, createSimpleItem(Material.AMETHYST_BLOCK, "&#00FF8Cᴀғᴋ", List.of("&fClick to teleport to a random afk area")));
+        }
+
         player.openInventory(inventory);
+    }
+
+    private ItemStack createLocationItem(FileConfiguration guiConfig, GuiType type, String key, Location location) {
+        Material material = material(guiConfig.getString("item.material", "ITEM_FRAME"));
+        int online = onlineInWorld(location == null ? null : location.getWorld());
+        int max = guiConfig.getInt("item.max-online", 100);
+        Map<String, String> placeholders = new HashMap<>();
+        placeholders.put(type.placeholder, key);
+        placeholders.put("name", key);
+        placeholders.put("online_lobby", String.valueOf(online));
+        placeholders.put("max_online", String.valueOf(max));
+
+        ItemStack item = new ItemStack(material);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(noItalic(color(apply(guiConfig.getString("item.name", "&#00A2FF%name%"), placeholders))));
+        List<Component> lore = new ArrayList<>();
+        for (String line : guiConfig.getStringList("item.lore")) {
+            lore.add(noItalic(color(apply(line, placeholders))));
+        }
+        meta.lore(lore);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private ItemStack createSimpleItem(Material material, String name, List<String> loreLines) {
+        ItemStack item = new ItemStack(material);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(noItalic(color(name)));
+        List<Component> lore = new ArrayList<>();
+        for (String line : loreLines) {
+            lore.add(noItalic(color(line)));
+        }
+        meta.lore(lore);
+        item.setItemMeta(meta);
+        return item;
     }
 
     @EventHandler
     public void onInventoryClick(InventoryClickEvent event) {
         if (!(event.getWhoClicked() instanceof Player player)) return;
         InventoryHolder holder = event.getInventory().getHolder();
-        if (!(holder instanceof SpawnHolder) && !(holder instanceof AfkHolder)) return;
+        if (!(holder instanceof PagedHolder pagedHolder)) return;
         event.setCancelled(true);
         if (event.getClickedInventory() == null || event.getClickedInventory() != event.getInventory()) return;
-        String key = guiSlots.get(event.getRawSlot());
-        if (key == null) return;
-        boolean afkGui = holder instanceof AfkHolder;
-        Location location = afkGui ? afks.get(key) : spawns.get(key);
+
+        int slot = event.getRawSlot();
+        if (slot == 45) {
+            if (pagedHolder.page > 0) {
+                openGui(player, pagedHolder.type, pagedHolder.page - 1);
+            }
+            return;
+        }
+        if (slot == 53) {
+            Map<String, Location> source = sourceFor(pagedHolder.type);
+            if ((pagedHolder.page + 1) * PAGE_SIZE < source.size()) {
+                openGui(player, pagedHolder.type, pagedHolder.page + 1);
+            }
+            return;
+        }
+        if (slot == 49) {
+            player.closeInventory();
+            if (pagedHolder.type == GuiType.SPAWN) {
+                teleportRandomSpawn(player);
+            } else {
+                teleportRandomAfk(player);
+            }
+            return;
+        }
+        if (slot < 0 || slot >= PAGE_SIZE) return;
+
+        Map<String, Location> source = sourceFor(pagedHolder.type);
+        List<String> keys = new ArrayList<>(source.keySet());
+        int index = pagedHolder.page * PAGE_SIZE + slot;
+        if (index < 0 || index >= keys.size()) return;
+        String key = keys.get(index);
+        Location location = source.get(key);
         if (location == null) return;
         player.closeInventory();
-        if (afkGui) teleportWithCooldown(player, location, "afk-success", Map.of("afk", key));
-        else teleportWithCooldown(player, location, "spawn-success", Map.of("spawn", key));
+        if (pagedHolder.type == GuiType.AFK) {
+            teleportWithCooldown(player, location, "afk-success", Map.of("afk", key));
+        } else {
+            teleportWithCooldown(player, location, "spawn-success", Map.of("spawn", key));
+        }
     }
 
     @EventHandler
     public void onInventoryDrag(InventoryDragEvent event) {
-        InventoryHolder holder = event.getInventory().getHolder();
-        if (holder instanceof SpawnHolder || holder instanceof AfkHolder) event.setCancelled(true);
+        if (event.getInventory().getHolder() instanceof PagedHolder) {
+            event.setCancelled(true);
+        }
     }
 
     @EventHandler
     public void onFirstJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
-        if (player.hasPlayedBefore()) return;
+        markMovement(player);
+        if (!player.hasPlayedBefore()) {
+            Location location = getFirstJoinSpawn();
+            if (location != null) {
+                Location target = location.clone();
+                player.getScheduler().runDelayed(this, task -> player.teleportAsync(target), null, 1L);
+            }
+        }
+        player.getScheduler().runDelayed(this, task -> evaluateAfkMembership(player), null, 1L);
+    }
 
-        Location location = getFirstJoinSpawn();
+    @EventHandler
+    public void onQuit(PlayerQuitEvent event) {
+        Player player = event.getPlayer();
+        lastMovement.remove(player.getUniqueId());
+        afkAutoTeleporting.remove(player.getUniqueId());
+        teleporting.remove(player);
+    }
+
+    @EventHandler
+    public void onMove(PlayerMoveEvent event) {
+        Location from = event.getFrom();
+        Location to = event.getTo();
+        if (to == null) return;
+        if (from.getBlockX() == to.getBlockX() && from.getBlockY() == to.getBlockY() && from.getBlockZ() == to.getBlockZ() && from.getWorld() == to.getWorld()) {
+            return;
+        }
+        markMovement(event.getPlayer());
+        evaluateAfkMembership(event.getPlayer());
+    }
+
+    @EventHandler
+    public void onTeleport(PlayerTeleportEvent event) {
+        Player player = event.getPlayer();
+        markMovement(player);
+        player.getScheduler().runDelayed(this, task -> evaluateAfkMembership(player), null, 1L);
+    }
+
+    @EventHandler
+    public void onRespawn(PlayerRespawnEvent event) {
+        Player player = event.getPlayer();
+        markMovement(player);
+        player.getScheduler().runDelayed(this, task -> evaluateAfkMembership(player), null, 1L);
+    }
+
+    @EventHandler
+    public void onWorldChange(PlayerChangedWorldEvent event) {
+        Player player = event.getPlayer();
+        markMovement(player);
+        player.getScheduler().runDelayed(this, task -> evaluateAfkMembership(player), null, 1L);
+    }
+
+    private void openGui(Player player, GuiType type, int page) {
+        if (type == GuiType.SPAWN) {
+            openSpawnGui(player, page);
+        } else {
+            openAfkGui(player, page);
+        }
+    }
+
+    private Map<String, Location> sourceFor(GuiType type) {
+        return type == GuiType.SPAWN ? spawns : afks;
+    }
+
+    private void teleportRandomSpawn(Player player) {
+        teleportRandom(player, spawns, "spawn-success", "spawn");
+    }
+
+    private void teleportRandomAfk(Player player) {
+        teleportRandom(player, afks, "afk-success", "afk");
+    }
+
+    private void teleportRandom(Player player, Map<String, Location> source, String successPath, String placeholderKey) {
+        if (source.isEmpty()) return;
+        List<String> keys = new ArrayList<>(source.keySet());
+        Collections.shuffle(keys);
+        String key = keys.get(0);
+        Location location = source.get(key);
         if (location == null) return;
-
-        Location target = location.clone();
-        player.getScheduler().runDelayed(this, task -> player.teleportAsync(target), null, 1L);
+        teleportWithCooldown(player, location, successPath, Map.of(placeholderKey, key));
     }
 
     private Location getFirstJoinSpawn() {
         if (spawns.isEmpty()) return null;
-
         Location defaultLocation = defaultSpawn == null || defaultSpawn.isBlank() ? null : spawns.get(defaultSpawn);
         if (defaultLocation != null) return defaultLocation;
-
         return spawns.values().iterator().next();
     }
 
@@ -407,6 +605,7 @@ public final class MarisSpawnPlugin extends JavaPlugin implements Listener, Comm
         player.teleportAsync(target).thenAccept(success -> {
             if (!success || !player.isOnline()) return;
             player.getScheduler().runDelayed(this, task -> {
+                markMovement(player);
                 Component message = color(apply(messages.getString(successPath, "&aTeleported."), placeholders));
                 player.sendMessage(message);
                 player.sendActionBar(message);
@@ -434,7 +633,9 @@ public final class MarisSpawnPlugin extends JavaPlugin implements Listener, Comm
         loadSection("spawns", spawns);
         loadSection("warps", warps);
         loadSection("afks", afks);
-        if ((defaultSpawn == null || defaultSpawn.isBlank() || !spawns.containsKey(defaultSpawn)) && !spawns.isEmpty()) defaultSpawn = spawns.keySet().iterator().next();
+        if ((defaultSpawn == null || defaultSpawn.isBlank() || !spawns.containsKey(defaultSpawn)) && !spawns.isEmpty()) {
+            defaultSpawn = spawns.keySet().iterator().next();
+        }
     }
 
     private void loadSection(String path, Map<String, Location> target) {
@@ -449,7 +650,6 @@ public final class MarisSpawnPlugin extends JavaPlugin implements Listener, Comm
             }
         }
     }
-
 
     private Location readLocation(String path) {
         ConfigurationSection section = locationConfig.getConfigurationSection(path);
@@ -535,7 +735,9 @@ public final class MarisSpawnPlugin extends JavaPlugin implements Listener, Comm
     private String apply(String text, Map<String, String> placeholders) {
         if (text == null) return "";
         String result = text;
-        for (Map.Entry<String, String> entry : placeholders.entrySet()) result = result.replace("%" + entry.getKey() + "%", entry.getValue());
+        for (Map.Entry<String, String> entry : placeholders.entrySet()) {
+            result = result.replace("%" + entry.getKey() + "%", entry.getValue());
+        }
         return result;
     }
 
@@ -600,9 +802,16 @@ public final class MarisSpawnPlugin extends JavaPlugin implements Listener, Comm
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        String name = command.getName().toLowerCase(Locale.ROOT);
+        if ("marispawn".equals(name)) {
+            if (args.length == 1) {
+                return List.of("reload").stream().filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT))).collect(Collectors.toList());
+            }
+            return Collections.emptyList();
+        }
         if (args.length != 1) return Collections.emptyList();
         String input = args[0].toLowerCase(Locale.ROOT);
-        return switch (command.getName().toLowerCase(Locale.ROOT)) {
+        return switch (name) {
             case "spawn" -> spawns.keySet().stream().filter(s -> s.toLowerCase(Locale.ROOT).startsWith(input)).collect(Collectors.toList());
             case "warp", "delwarp" -> warps.keySet().stream().filter(s -> s.toLowerCase(Locale.ROOT).startsWith(input)).collect(Collectors.toList());
             case "afk" -> afks.keySet().stream().filter(s -> s.toLowerCase(Locale.ROOT).startsWith(input)).collect(Collectors.toList());
@@ -611,21 +820,124 @@ public final class MarisSpawnPlugin extends JavaPlugin implements Listener, Comm
         };
     }
 
-    private static final class SpawnHolder implements InventoryHolder {
-        @Override
-        public Inventory getInventory() {
-            return Bukkit.createInventory(this, 54, Component.text("MarisSpawn"));
+    private void startAfkWatcher() {
+        stopAfkWatcher();
+        try {
+            Object scheduler = Bukkit.getServer().getClass().getMethod("getGlobalRegionScheduler").invoke(Bukkit.getServer());
+            Method runAtFixedRate = scheduler.getClass().getMethod("runAtFixedRate", org.bukkit.plugin.Plugin.class, java.util.function.Consumer.class, long.class, long.class);
+            afkTaskHandle = runAtFixedRate.invoke(scheduler, this, new AfkWatcherConsumer(this), 20L, 20L);
+            afkWatcherUsesFolia = true;
+        } catch (ReflectiveOperationException ignored) {
+            afkTaskHandle = Bukkit.getScheduler().runTaskTimer(this, this::tickAfkWatcher, 20L, 20L);
+            afkWatcherUsesFolia = false;
         }
     }
 
-    private static final class AfkHolder implements InventoryHolder {
-        @Override
-        public Inventory getInventory() {
-            return Bukkit.createInventory(this, 54, Component.text("MarisAfk"));
+    private void stopAfkWatcher() {
+        if (afkTaskHandle == null) return;
+        try {
+            if (afkWatcherUsesFolia) {
+                afkTaskHandle.getClass().getMethod("cancel").invoke(afkTaskHandle);
+            } else if (afkTaskHandle instanceof org.bukkit.scheduler.BukkitTask task) {
+                task.cancel();
+            }
+        } catch (ReflectiveOperationException ignored) {
+        }
+        afkTaskHandle = null;
+    }
+
+    private void tickAfkWatcher() {
+        if (afks.isEmpty()) return;
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            if (!isInForcedAfkWorld(player)) continue;
+
+            long last = lastMovement.computeIfAbsent(player.getUniqueId(), uuid -> System.currentTimeMillis());
+            if (System.currentTimeMillis() - last < AFK_TRIGGER_MILLIS) continue;
+            if (!afkAutoTeleporting.add(player.getUniqueId())) continue;
+
+            teleportPlayerToRandomAfk(player);
         }
     }
 
+    private void teleportPlayerToRandomAfk(Player player) {
+        if (afks.isEmpty()) {
+            afkAutoTeleporting.remove(player.getUniqueId());
+            return;
+        }
+        List<String> keys = new ArrayList<>(afks.keySet());
+        Collections.shuffle(keys);
+        String key = keys.get(0);
+        Location location = afks.get(key);
+        if (location == null) {
+            afkAutoTeleporting.remove(player.getUniqueId());
+            return;
+        }
+        player.getScheduler().run(this, task -> {
+            if (!player.isOnline()) {
+                afkAutoTeleporting.remove(player.getUniqueId());
+                return;
+            }
+            player.performCommand("afk " + key);
+            player.getScheduler().runDelayed(this, delayedTask -> {
+                afkAutoTeleporting.remove(player.getUniqueId());
+                markMovement(player);
+                evaluateAfkMembership(player);
+            }, () -> afkAutoTeleporting.remove(player.getUniqueId()), 2L);
+        }, () -> afkAutoTeleporting.remove(player.getUniqueId()));
+    }
 
+    private boolean isInForcedAfkWorld(Player player) {
+        World world = player.getWorld();
+        return world != null && "spawn".equalsIgnoreCase(world.getName());
+    }
+
+    private void markMovement(Player player) {
+        lastMovement.put(player.getUniqueId(), System.currentTimeMillis());
+    }
+
+    private void evaluateAfkMembership(Player player) {
+        if (!player.isOnline()) return;
+        if (isInForcedAfkWorld(player)) {
+            lastMovement.putIfAbsent(player.getUniqueId(), System.currentTimeMillis());
+        }
+    }
+
+    private enum GuiType {
+        SPAWN("spawn"),
+        AFK("afk");
+
+        private final String placeholder;
+
+        GuiType(String placeholder) {
+            this.placeholder = placeholder;
+        }
+    }
+
+    private static final class PagedHolder implements InventoryHolder {
+        private final GuiType type;
+        private final int page;
+
+        private PagedHolder(GuiType type, int page) {
+            this.type = type;
+            this.page = page;
+        }
+
+        @Override
+        public Inventory getInventory() {
+            return Bukkit.createInventory(this, GUI_SIZE, Component.text("MarisSpawn"));
+        }
+    }
+
+    private static final class AfkWatcherConsumer implements java.util.function.Consumer<Object> {
+        private final MarisSpawnPlugin plugin;
+
+        private AfkWatcherConsumer(MarisSpawnPlugin plugin) {
+            this.plugin = plugin;
+        }
+
+        @Override
+        public void accept(Object ignored) {
+            plugin.tickAfkWatcher();
+        }
+    }
 }
-
-
